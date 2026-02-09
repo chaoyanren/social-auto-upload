@@ -38,7 +38,7 @@ def get_title_and_hashtags(filename):
     return title, hashtags
 
 
-def generate_schedule_time_next_day(total_videos, videos_per_day, daily_times=None, timestamps=False, start_days=0):
+def generate_schedule_time_next_day(total_videos, videos_per_day, daily_times=None, timestamps=False, start_days=1):
     """
     Generate a schedule for video uploads, starting from the next day.
 
@@ -67,7 +67,7 @@ def generate_schedule_time_next_day(total_videos, videos_per_day, daily_times=No
     current_time = datetime.now()
 
     for video in range(total_videos):
-        day = video // videos_per_day + start_days + 1  # +1 to start from the next day
+        day = video // videos_per_day + start_days + 0  # +1 to start from the next day
         daily_video_index = video % videos_per_day
 
         # Calculate the time for the current video
