@@ -167,4 +167,24 @@ youtube_uploader/*.json
 douyin_uploader/*.json
 bilibili_uploader/*.json
 tk_uploader/*.json
+
+# 配置文件
+conf.py
+
+# 账号文件
 cookies
+
+# Frontend
+.vite/
+dist/
+node_modules/
+package-lock.json
+
+# database
+db/database.db
+
+# 临时文件夹
+cookiesFile
+uploadFile
+videoFile
+

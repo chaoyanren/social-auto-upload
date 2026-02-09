@@ -6,7 +6,7 @@ from playwright.async_api import Playwright, async_playwright
 import os
 import asyncio
 
-from conf import LOCAL_CHROME_PATH
+from conf import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS
 from uploader.tk_uploader.tk_config import Tk_Locator
 from utils.base_social_media import set_init_script
 from utils.files_times import get_absolute_path
@@ -15,7 +15,7 @@ from utils.log import tiktok_logger
 
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
         # 创建一个新的页面
@@ -55,7 +55,7 @@ async def get_tiktok_cookie(account_file):
             'args': [
                 '--lang en-GB',
             ],
-            'headless': False,  # Set headless option here
+            'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
         }
         # Make sure to run headed.
         browser = await playwright.chromium.launch(**options)
@@ -79,13 +79,14 @@ class TiktokVideo(object):
         self.thumbnail_path = thumbnail_path
         self.account_file = account_file
         self.local_executable_path = LOCAL_CHROME_PATH
+        self.headless = LOCAL_CHROME_HEADLESS
         self.locator_base = None
 
     async def set_schedule_time(self, page, publish_date):
         schedule_input_element = self.locator_base.get_by_label('Schedule')
         await schedule_input_element.wait_for(state='visible')  # 确保按钮可见
 
-        await schedule_input_element.click()
+        await schedule_input_element.click(force=True)
         if await self.locator_base.locator('div.TUXButton-content >> text=Allow').count():
             await self.locator_base.locator('div.TUXButton-content >> text=Allow').click()
 
@@ -127,15 +128,11 @@ class TiktokVideo(object):
         minute_selector = f"span.tiktok-timepicker-right:has-text('{minute_str}')"
 
         # pick hour first
-        await page.wait_for_timeout(500)  # 等待500毫秒
+        await page.wait_for_timeout(1000)  # 等待500毫秒
         await self.locator_base.locator(hour_selector).click()
         # click time button again
-        await page.wait_for_timeout(500)  # 等待500毫秒
-        await scheduled_picker.locator('div.TUXInputBox').nth(0).click()
-        await page.wait_for_timeout(500)  # 等待500毫秒
+        await page.wait_for_timeout(1000)  # 等待500毫秒
         # pick minutes after
-        await scheduled_picker.locator('div.TUXInputBox').nth(0).click()
-        await page.wait_for_timeout(500)  # 等待500毫秒
         await self.locator_base.locator(minute_selector).click()
 
         # click title to remove the focus.
@@ -150,9 +147,9 @@ class TiktokVideo(object):
         await file_chooser.set_files(self.file_path)
 
     async def upload(self, playwright: Playwright) -> None:
-        browser = await playwright.chromium.launch(headless=False, executable_path=self.local_executable_path)
+        browser = await playwright.chromium.launch(headless=self.headless, executable_path=self.local_executable_path)
         context = await browser.new_context(storage_state=f"{self.account_file}")
-        context = await set_init_script(context)
+        # context = await set_init_script(context)
         page = await context.new_page()
 
         # change language to eng first
@@ -190,6 +187,7 @@ class TiktokVideo(object):
             await self.set_schedule_time(page, self.publish_date)
 
         await self.click_publish(page)
+        tiktok_logger.success(f"video_id: {await self.get_last_video_id(page)}")
 
         await context.storage_state(path=f"{self.account_file}")  # save cookie
         tiktok_logger.info('  [-] update cookie！')
@@ -245,12 +243,15 @@ class TiktokVideo(object):
     async def change_language(self, page):
         # set the language to english
         await page.goto("https://www.tiktok.com")
-        await page.wait_for_url("https://www.tiktok.com/", timeout=100000)
-        await page.wait_for_selector('#header-more-menu-icon')
+        await page.wait_for_load_state('domcontentloaded')
+        await page.wait_for_selector('[data-e2e="nav-more-menu"]')
+        # 已经设置为英文, 省略这个步骤
+        if await page.locator('[data-e2e="nav-more-menu"]').text_content() == "More":
+            return
 
-        await page.locator('#header-more-menu-icon').hover()
+        await page.locator('[data-e2e="nav-more-menu"]').click()
         await page.locator('[data-e2e="language-select"]').click()
-        await page.locator('#lang-setting-popup-list >> text=English').click()
+        await page.locator('#creator-tools-selection-menu-header >> text=English (US)').click()
 
     async def click_publish(self, page):
         success_flag_div = 'div.common-modal-confirm-modal'
@@ -260,18 +261,22 @@ class TiktokVideo(object):
                 if await publish_button.count():
                     await publish_button.click()
 
-                await self.locator_base.locator(success_flag_div).wait_for(state="visible", timeout=3000)
+                await page.wait_for_url("https://www.tiktok.com/tiktokstudio/content",  timeout=3000)
                 tiktok_logger.success("  [-] video published success")
                 break
             except Exception as e:
-                if await self.locator_base.locator(success_flag_div).count():
-                    tiktok_logger.success("  [-]video published success")
-                    break
-                else:
-                    tiktok_logger.exception(f"  [-] Exception: {e}")
-                    tiktok_logger.info("  [-] video publishing")
-                    await page.screenshot(full_page=True)
-                    await asyncio.sleep(0.5)
+                tiktok_logger.exception(f"  [-] Exception: {e}")
+                tiktok_logger.info("  [-] video publishing")
+                await asyncio.sleep(0.5)
+
+    async def get_last_video_id(self, page):
+        await page.wait_for_selector('div[data-tt="components_PostTable_Container"]')
+        video_list_locator = self.locator_base.locator('div[data-tt="components_PostTable_Container"] div[data-tt="components_PostInfoCell_Container"] a')
+        if await video_list_locator.count():
+            first_video_obj = await video_list_locator.nth(0).get_attribute('href')
+            video_id = re.search(r'video/(\d+)', first_video_obj).group(1) if first_video_obj else None
+            return video_id
+
 
     async def detect_upload_status(self, page):
         while True:
