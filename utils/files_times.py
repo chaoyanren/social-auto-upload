@@ -39,7 +39,11 @@ def get_title_and_hashtags(filename):
 
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 def generate_schedule_time_next_day(total_videos, videos_per_day, daily_times=None, timestamps=False, start_days=1):
+=======
+def generate_schedule_time_next_day(total_videos, videos_per_day = 1, daily_times=None, timestamps=False, start_days=0):
+>>>>>>> ab2dbb0de641792ceae89b55f30edb671cf401c3
 =======
 def generate_schedule_time_next_day(total_videos, videos_per_day = 1, daily_times=None, timestamps=False, start_days=0):
 >>>>>>> ab2dbb0de641792ceae89b55f30edb671cf401c3
