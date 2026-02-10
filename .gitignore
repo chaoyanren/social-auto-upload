@@ -188,3 +188,7 @@ cookiesFile
 uploadFile
 videoFile
 
+
+# local generated videos (do not upload)
+videos/**
+!videos/.gitkeep

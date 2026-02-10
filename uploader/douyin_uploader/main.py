@@ -26,6 +26,15 @@ async def cookie_auth(account_file):
             await context.close()
             await browser.close()
             return False
+        # On recent Douyin creator pages, an invalid session may still stay on the same URL
+        # but render a login panel. A valid session should expose a file input for upload.
+        try:
+            await page.locator("input[type='file']").first.wait_for(timeout=15000)
+        except:
+            print("[+] cookie 失效：未检测到上传控件")
+            await context.close()
+            await browser.close()
+            return False
         # 2024.06.17 抖音创作者中心改版
         if await page.get_by_text('手机号登录').count() or await page.get_by_text('扫码登录').count():
             print("[+] 等待5秒 cookie 失效")
@@ -95,7 +104,27 @@ class DouYinVideo(object):
 
     async def handle_upload_error(self, page):
         douyin_logger.info('视频出错了，重新上传中')
-        await page.locator('div.progress-div [class^="upload-btn-input"]').set_input_files(self.file_path)
+        upload_input = await self._locate_upload_input(page)
+        if upload_input is None:
+            raise RuntimeError("Upload input not found while retrying. Cookie may be invalid; please login again.")
+        await upload_input.set_input_files(self.file_path)
+
+    async def _locate_upload_input(self, page: Page):
+        # The old selector ("div[class^='container'] input") can match login inputs.
+        # Prefer dedicated file inputs.
+        candidates = [
+            "div.progress-div input[type='file']",
+            "div[class^='semi-upload'] input[type='file']",
+            "input[type='file']",
+        ]
+        for selector in candidates:
+            loc = page.locator(selector).first
+            try:
+                await loc.wait_for(timeout=5000)
+                return loc
+            except:
+                continue
+        return None
 
     async def upload(self, playwright: Playwright) -> None:
         # 使用 Chromium 浏览器启动一个浏览器实例
@@ -116,7 +145,10 @@ class DouYinVideo(object):
         douyin_logger.info(f'[-] 正在打开主页...')
         await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload")
         # 点击 "上传视频" 按钮
-        await page.locator("div[class^='container'] input").set_input_files(self.file_path)
+        upload_input = await self._locate_upload_input(page)
+        if upload_input is None:
+            raise RuntimeError("Upload input not found. Cookie may be invalid; please login again.")
+        await upload_input.set_input_files(self.file_path)
 
         # 等待页面跳转到指定的 URL 2025.01.08修改在原有基础上兼容两种页面
         while True:

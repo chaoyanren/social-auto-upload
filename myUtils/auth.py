@@ -23,6 +23,13 @@ async def cookie_auth_douyin(account_file):
         await page.goto("https://creator.douyin.com/creator-micro/content/upload")
         try:
             await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload", timeout=5000)
+            # Invalid sessions can still render a login panel on the same URL.
+            # A valid session should expose a file input for upload.
+            try:
+                await page.locator("input[type='file']").first.wait_for(timeout=15000)
+            except:
+                douyin_logger.error("[+] cookie 失效：未检测到上传控件")
+                return False
             # 2024.06.17 抖音创作者中心改版
             # 判断
             # 等待“扫码登录”元素出现，超时 5 秒（如果 5 秒没出现，说明 cookie 有效）
