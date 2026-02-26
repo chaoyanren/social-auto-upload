@@ -37,24 +37,41 @@ def load_synced_entries(record_file: Path) -> list[dict]:
     return entries
 
 
-def parse_daily_times(value: str) -> list[int]:
-    result = []
+def parse_daily_times(value: str) -> list[tuple[int, int]]:
+    result: list[tuple[int, int]] = []
     for part in value.split(","):
         part = part.strip()
         if not part:
             continue
-        hour = int(part)
+        if ":" in part:
+            hour_text, minute_text = part.split(":", 1)
+            hour = int(hour_text)
+            minute = int(minute_text)
+        else:
+            hour = int(part)
+            minute = 0
         if hour < 0 or hour > 23:
             raise ValueError(f"Invalid hour: {hour}")
-        result.append(hour)
+        if minute < 0 or minute > 59:
+            raise ValueError(f"Invalid minute: {minute}")
+        result.append((hour, minute))
     if not result:
-        result = [15]
+        result = [(15, 0)]
     return result
 
 
-async def upload_files(entries: list[dict], daily_times: list[int]) -> int:
+async def upload_files(entries: list[dict], daily_times: list[tuple[int, int]], videos_per_day: int = 0) -> int:
     account_file = Path(BASE_DIR) / "cookies" / "douyin_uploader" / "account.json"
-    publish_datetimes = generate_schedule_time_next_day(len(entries), 1, daily_times=daily_times)
+
+    effective_videos_per_day = videos_per_day if videos_per_day > 0 else min(len(entries), len(daily_times))
+    if effective_videos_per_day > len(daily_times):
+        raise ValueError("videos_per_day should not exceed number of daily times")
+
+    publish_datetimes = generate_schedule_time_next_day(
+        len(entries),
+        effective_videos_per_day,
+        daily_times=daily_times,
+    )
 
     ok = await douyin_setup(account_file, handle=False)
     if not ok:
@@ -87,7 +104,13 @@ def main() -> int:
     parser.add_argument(
         "--daily-times",
         default="15",
-        help="Comma-separated publish hours, e.g. 15 or 10,15,20",
+        help="Comma-separated publish times, e.g. 15 or 10,12:30,20",
+    )
+    parser.add_argument(
+        "--videos-per-day",
+        type=int,
+        default=0,
+        help="How many videos to schedule per day (0 means auto = len(daily-times)).",
     )
     args = parser.parse_args()
 
@@ -99,7 +122,7 @@ def main() -> int:
 
     daily_times = parse_daily_times(args.daily_times)
     try:
-        asyncio.run(upload_files(entries, daily_times), debug=False)
+        asyncio.run(upload_files(entries, daily_times, videos_per_day=args.videos_per_day), debug=False)
     except Exception as e:
         print(f"Upload error: {e}")
         return 1

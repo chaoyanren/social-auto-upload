@@ -31,6 +31,27 @@ def get_title_and_hashtags(filename):
     return title, hashtags
 
 
+def _normalize_time_slot(slot):
+    """Normalize a time slot into (hour, minute). Supports int hour or 'HH[:MM]'."""
+    if isinstance(slot, tuple) and len(slot) == 2:
+        hour, minute = int(slot[0]), int(slot[1])
+    elif isinstance(slot, str):
+        text = slot.strip()
+        if ":" in text:
+            hour_text, minute_text = text.split(":", 1)
+            hour, minute = int(hour_text), int(minute_text)
+        else:
+            hour, minute = int(text), 0
+    else:
+        hour, minute = int(slot), 0
+
+    if hour < 0 or hour > 23:
+        raise ValueError(f"Invalid hour: {hour}")
+    if minute < 0 or minute > 59:
+        raise ValueError(f"Invalid minute: {minute}")
+    return hour, minute
+
+
 def generate_schedule_time_next_day(total_videos, videos_per_day=1, daily_times=None, timestamps=False, start_days=0):
     """Generate publish schedule for N videos."""
     if videos_per_day <= 0:
@@ -49,11 +70,11 @@ def generate_schedule_time_next_day(total_videos, videos_per_day=1, daily_times=
         day = video // videos_per_day + start_days
         daily_video_index = video % videos_per_day
 
-        hour = daily_times[daily_video_index]
+        hour, minute = _normalize_time_slot(daily_times[daily_video_index])
         time_offset = timedelta(
             days=day,
             hours=hour - current_time.hour,
-            minutes=-current_time.minute,
+            minutes=minute - current_time.minute,
             seconds=-current_time.second,
             microseconds=-current_time.microsecond,
         )

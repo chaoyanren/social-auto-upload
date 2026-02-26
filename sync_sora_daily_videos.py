@@ -18,6 +18,59 @@ def find_latest_daily_dir(source_root: Path) -> Path:
     return sorted(candidates, key=lambda p: p.name, reverse=True)[0]
 
 
+def is_wm_video_file(video_path: Path) -> bool:
+    return video_path.stem.lower().endswith("_wm")
+
+
+def normalized_asset_id_from_video(video_path: Path) -> str:
+    stem = video_path.stem
+    if stem.lower().endswith("_wm"):
+        return stem[:-3]
+    return stem
+
+
+def list_syncable_videos(source_dir: Path, video_variant: str) -> list[Path]:
+    files = [p for p in source_dir.glob("*.mp4") if p.is_file()]
+    if video_variant == "main_only":
+        return [p for p in files if not is_wm_video_file(p)]
+    if video_variant == "wm_only":
+        return [p for p in files if is_wm_video_file(p)]
+    return files
+
+
+def resolve_source_dir(source_root: Path, date_arg: str, video_variant: str) -> tuple[Path, str]:
+    date_value = (date_arg or "latest").strip()
+    date_lower = date_value.lower()
+
+    if date_lower == "latest":
+        daily_dirs = [p for p in source_root.iterdir() if p.is_dir() and p.name.isdigit() and len(p.name) == 8]
+        if daily_dirs:
+            return sorted(daily_dirs, key=lambda p: p.name, reverse=True)[0], "daily"
+        if list_syncable_videos(source_root, video_variant):
+            return source_root, "flat"
+        raise FileNotFoundError(
+            f"No daily folders like YYYYMMDD under: {source_root}, and no syncable videos found under source root. "
+            "Try: 1) run downloader first; 2) use --date root to force flat source-root mode."
+        )
+
+    if date_lower in {"root", "flat", "."}:
+        if not list_syncable_videos(source_root, video_variant):
+            raise FileNotFoundError(
+                f"No syncable videos found under source root: {source_root}. "
+                "Try: 1) run downloader first; 2) switch --video-variant."
+            )
+        return source_root, "flat"
+
+    source_dir = source_root / date_value
+    if source_dir.exists() and source_dir.is_dir():
+        return source_dir, "daily"
+
+    raise FileNotFoundError(
+        f"Date folder not found: {source_dir}. "
+        "Try: 1) use --date latest; 2) use --date root for flat source-root mode."
+    )
+
+
 def pick_thumbnail_url(item: dict) -> str:
     url = (item.get("thumbnail") or "").strip()
     if url:
@@ -28,13 +81,14 @@ def pick_thumbnail_url(item: dict) -> str:
     return ""
 
 
-def load_manifest_index(manifest_path: Path) -> tuple[dict, dict]:
+def load_manifest_index(manifest_path: Path) -> tuple[list[dict], dict, dict]:
     if not manifest_path.exists():
-        return {}, {}
+        return [], {}, {}
     with open(manifest_path, "r", encoding="utf-8") as f:
         data = json.load(f)
+    entries = data if isinstance(data, list) else []
     by_asset = {}
-    for item in (data or []):
+    for item in entries:
         asset_id = item.get("asset_id")
         if asset_id:
             by_asset[asset_id] = item
@@ -46,7 +100,57 @@ def load_manifest_index(manifest_path: Path) -> tuple[dict, dict]:
         if url:
             thumb_counts[url] = thumb_counts.get(url, 0) + 1
 
-    return by_asset, thumb_counts
+    return entries, by_asset, thumb_counts
+
+
+def candidate_names_for_asset(asset_id: str, video_variant: str) -> list[str]:
+    if video_variant == "wm_only":
+        return [f"{asset_id}_wm.mp4"]
+    if video_variant == "main_only":
+        return [f"{asset_id}.mp4"]
+    return [f"{asset_id}.mp4", f"{asset_id}_wm.mp4"]
+
+
+def ordered_source_videos(
+    source_dir: Path,
+    manifest_entries: list[dict],
+    limit: int,
+    video_variant: str,
+    source_mode: str,
+) -> list[Path]:
+    files = list_syncable_videos(source_dir, video_variant)
+    if not files:
+        return []
+
+    # Flat mode: prioritize newest manifest assets, then backfill by file mtime.
+    if source_mode == "flat":
+        by_name = {p.name: p for p in files}
+        selected: list[Path] = []
+        used_names: set[str] = set()
+        seen_assets: set[str] = set()
+
+        for item in manifest_entries:
+            asset_id = str(item.get("asset_id") or "").strip()
+            if not asset_id or asset_id in seen_assets:
+                continue
+            seen_assets.add(asset_id)
+            for name in candidate_names_for_asset(asset_id, video_variant):
+                if name in used_names:
+                    continue
+                matched = by_name.get(name)
+                if matched:
+                    selected.append(matched)
+                    used_names.add(name)
+
+        remaining = [p for p in files if p.name not in used_names]
+        remaining.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
+        selected.extend(remaining)
+    else:
+        selected = sorted(files, key=lambda p: p.name)
+
+    if limit and limit > 0:
+        return selected[:limit]
+    return selected
 
 
 def download_thumbnail_image(url: str, out_path: Path, overwrite: bool) -> bool:
@@ -180,7 +284,7 @@ def extract_cover_frame(video_path: Path, out_path: Path, overwrite: bool, prefe
 
 
 def title_for_file(video_path: Path, manifest_map: dict) -> str:
-    stem = video_path.stem
+    stem = normalized_asset_id_from_video(video_path)
     item = manifest_map.get(stem)
     if not item:
         return stem
@@ -197,11 +301,17 @@ def sync_videos(
     overwrite: bool,
     cover_strategy: str,
     cover_frame_seconds: float,
+    video_variant: str,
+    source_mode: str,
 ) -> list[dict]:
-    manifest_map, thumb_counts = load_manifest_index(source_dir / "manifest.latest.json")
-    files = sorted(source_dir.glob("*.mp4"), key=lambda p: p.name)
-    if limit and limit > 0:
-        files = files[:limit]
+    manifest_entries, manifest_map, thumb_counts = load_manifest_index(source_dir / "manifest.latest.json")
+    files = ordered_source_videos(
+        source_dir,
+        manifest_entries,
+        limit=limit,
+        video_variant=video_variant,
+        source_mode=source_mode,
+    )
 
     target_dir.mkdir(parents=True, exist_ok=True)
     synced: list[dict] = []
@@ -218,7 +328,8 @@ def sync_videos(
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(f"{title}\n#sora\n")
 
-        item = manifest_map.get(src.stem, {}) if manifest_map else {}
+        asset_id = normalized_asset_id_from_video(src)
+        item = manifest_map.get(asset_id, {}) if manifest_map else {}
         thumbnail_url = pick_thumbnail_url(item) if item else ""
         is_duplicate_thumb = bool(thumbnail_url) and thumb_counts.get(thumbnail_url, 0) > 1
 
@@ -273,6 +384,7 @@ def sync_videos(
         synced.append(
             {
                 "name": src.name,
+                "asset_id": asset_id,
                 "mp4": str(dst),
                 "txt": str(txt_path),
                 "title": title,
@@ -287,11 +399,20 @@ def sync_videos(
     return synced
 
 
-def write_record(record_file: Path, source_dir: Path, target_dir: Path, synced: list[dict]) -> None:
+def write_record(
+    record_file: Path,
+    source_dir: Path,
+    target_dir: Path,
+    synced: list[dict],
+    source_mode: str,
+    video_variant: str,
+) -> None:
     record_file.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source_dir": str(source_dir),
+        "source_mode": source_mode,
+        "video_variant": video_variant,
         "target_dir": str(target_dir),
         "synced_count": len(synced),
         "synced_files": synced,
@@ -307,12 +428,12 @@ def main():
     parser.add_argument(
         "--source-root",
         default=r"D:\Development\sora-ai-video-downloader-python\videos",
-        help="Root folder that contains daily YYYYMMDD subfolders.",
+        help="Root folder for downloader outputs. Supports daily YYYYMMDD folders and flat mp4 layout.",
     )
     parser.add_argument(
         "--date",
         default="latest",
-        help="Date folder name YYYYMMDD, or 'latest'.",
+        help="Date folder name YYYYMMDD, 'latest', or root/flat/. for flat source-root mode.",
     )
     parser.add_argument(
         "--target-dir",
@@ -338,20 +459,22 @@ def main():
         default=5.0,
         help="When cover-strategy uses 'frame', extract a frame around this timestamp (falls back to first frame).",
     )
+    parser.add_argument(
+        "--video-variant",
+        default="all",
+        choices=["all", "main_only", "wm_only"],
+        help="Choose which mp4 variant to sync: all, main_only, or wm_only (wm_only means no-watermark in this workflow).",
+    )
     args = parser.parse_args()
 
     source_root = Path(args.source_root).resolve()
     target_dir = Path(args.target_dir).resolve()
     record_file = Path(args.record_file).resolve()
 
-    if args.date.lower() == "latest":
-        source_dir = find_latest_daily_dir(source_root)
-    else:
-        source_dir = source_root / args.date
-        if not source_dir.exists():
-            raise FileNotFoundError(f"Date folder not found: {source_dir}")
+    source_dir, source_mode = resolve_source_dir(source_root, args.date, args.video_variant)
 
     print(f"source: {source_dir}")
+    print(f"source mode: {source_mode}")
     print(f"target: {target_dir}")
 
     synced = sync_videos(
@@ -361,8 +484,17 @@ def main():
         args.overwrite,
         cover_strategy=args.cover_strategy,
         cover_frame_seconds=args.cover_frame_seconds,
+        video_variant=args.video_variant,
+        source_mode=source_mode,
     )
-    write_record(record_file, source_dir, target_dir, synced)
+    write_record(
+        record_file,
+        source_dir,
+        target_dir,
+        synced,
+        source_mode=source_mode,
+        video_variant=args.video_variant,
+    )
     print(f"record: {record_file}")
     print(f"done. synced files: {len(synced)}")
 
