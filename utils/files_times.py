@@ -1,7 +1,12 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from conf import BASE_DIR
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
 
 
 def get_absolute_path(relative_path: str, base_dir: str = "") -> str:
@@ -52,6 +57,15 @@ def _normalize_time_slot(slot):
     return hour, minute
 
 
+def _beijing_tz():
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo("Asia/Shanghai")
+        except Exception:
+            pass
+    return timezone(timedelta(hours=8), name="UTC+08:00")
+
+
 def generate_schedule_time_next_day(total_videos, videos_per_day=1, daily_times=None, timestamps=False, start_days=0):
     """Generate publish schedule for N videos."""
     if videos_per_day <= 0:
@@ -64,23 +78,32 @@ def generate_schedule_time_next_day(total_videos, videos_per_day=1, daily_times=
         raise ValueError("videos_per_day should not exceed the length of daily_times")
 
     schedule = []
-    current_time = datetime.now()
+    beijing_tz = _beijing_tz()
+    current_time = datetime.now(beijing_tz)
+    last_scheduled = None
 
     for video in range(total_videos):
         day = video // videos_per_day + start_days
         daily_video_index = video % videos_per_day
 
         hour, minute = _normalize_time_slot(daily_times[daily_video_index])
-        time_offset = timedelta(
-            days=day,
-            hours=hour - current_time.hour,
-            minutes=minute - current_time.minute,
-            seconds=-current_time.second,
-            microseconds=-current_time.microsecond,
+
+        target_day = (current_time + timedelta(days=day)).date()
+        scheduled_dt = datetime(
+            target_day.year,
+            target_day.month,
+            target_day.day,
+            hour,
+            minute,
+            tzinfo=beijing_tz,
         )
-        schedule.append(current_time + time_offset)
+        while scheduled_dt <= current_time or (last_scheduled is not None and scheduled_dt <= last_scheduled):
+            scheduled_dt += timedelta(days=1)
+
+        schedule.append(scheduled_dt)
+        last_scheduled = scheduled_dt
 
     if timestamps:
         return [int(time.timestamp()) for time in schedule]
-    return schedule
+    return [time.replace(tzinfo=None) for time in schedule]
 
