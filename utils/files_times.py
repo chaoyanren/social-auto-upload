@@ -66,10 +66,22 @@ def _beijing_tz():
     return timezone(timedelta(hours=8), name="UTC+08:00")
 
 
-def generate_schedule_time_next_day(total_videos, videos_per_day=1, daily_times=None, timestamps=False, start_days=0):
-    """Generate publish schedule for N videos."""
+def generate_schedule_time_next_day(
+    total_videos,
+    videos_per_day=1,
+    daily_times=None,
+    timestamps=False,
+    start_days=0,
+    min_lead_minutes=0,
+):
+    """Generate publish schedule for N videos.
+
+    min_lead_minutes enforces a minimum future buffer from current Beijing time.
+    """
     if videos_per_day <= 0:
         raise ValueError("videos_per_day should be a positive integer")
+    if min_lead_minutes < 0:
+        raise ValueError("min_lead_minutes should be non-negative")
 
     if daily_times is None:
         daily_times = [6, 11, 14, 16, 22]
@@ -80,6 +92,7 @@ def generate_schedule_time_next_day(total_videos, videos_per_day=1, daily_times=
     schedule = []
     beijing_tz = _beijing_tz()
     current_time = datetime.now(beijing_tz)
+    min_publish_time = current_time + timedelta(minutes=min_lead_minutes)
     last_scheduled = None
 
     for video in range(total_videos):
@@ -97,7 +110,9 @@ def generate_schedule_time_next_day(total_videos, videos_per_day=1, daily_times=
             minute,
             tzinfo=beijing_tz,
         )
-        while scheduled_dt <= current_time or (last_scheduled is not None and scheduled_dt <= last_scheduled):
+        while scheduled_dt <= min_publish_time or (
+            last_scheduled is not None and scheduled_dt <= last_scheduled
+        ):
             scheduled_dt += timedelta(days=1)
 
         schedule.append(scheduled_dt)

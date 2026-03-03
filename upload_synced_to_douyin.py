@@ -1,12 +1,35 @@
 import argparse
 import asyncio
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 
 from conf import BASE_DIR
 from uploader.douyin_uploader.main import DouYinVideo, douyin_setup
 from utils.files_times import generate_schedule_time_next_day, get_title_and_hashtags
+
+DOUYIN_MIN_LEAD_MINUTES = 135  # 2h15m safety window against <2h platform validation.
+
+
+def configure_console_encoding() -> None:
+    # Avoid Windows GBK crashes when title/tags contain emoji.
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def safe_console_text(value: object) -> str:
+    text = str(value)
+    encoding = (getattr(sys.stdout, "encoding", None) or "utf-8")
+    try:
+        return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+    except Exception:
+        return text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
 
 
 def load_record(record_file: Path) -> dict:
@@ -137,6 +160,7 @@ async def upload_files(
         len(entries),
         effective_videos_per_day,
         daily_times=daily_times,
+        min_lead_minutes=DOUYIN_MIN_LEAD_MINUTES,
     )
 
     ok = await douyin_setup(account_file, handle=False)
@@ -148,9 +172,9 @@ async def upload_files(
         thumbnail_path = entry.get("thumbnail")
         title, tags = get_title_and_hashtags(str(file))
 
-        print(f"uploading: {file}")
-        print(f"title: {title}")
-        print(f"tags: {tags}")
+        print(f"uploading: {safe_console_text(file)}")
+        print(f"title: {safe_console_text(title)}")
+        print(f"tags: {safe_console_text(tags)}")
 
         try:
             if isinstance(thumbnail_path, Path) and thumbnail_path.exists():
@@ -177,6 +201,7 @@ async def upload_files(
 
 
 def main() -> int:
+    configure_console_encoding()
     parser = argparse.ArgumentParser(description="Upload files listed in sync record to Douyin.")
     parser.add_argument(
         "--record-file",

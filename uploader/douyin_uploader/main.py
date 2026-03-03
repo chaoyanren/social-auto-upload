@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from playwright.async_api import Playwright, async_playwright, Page
 import os
@@ -87,20 +87,97 @@ class DouYinVideo(object):
         self.productTitle = productTitle
 
     async def set_schedule_time_douyin(self, page, publish_date):
-        # 选择包含特定文本内容的 label 元素
-        label_element = page.locator("[class^='radio']:has-text('定时发布')")
-        # 在选中的 label 元素下点击 checkbox
-        await label_element.click()
-        await asyncio.sleep(1)
+        await self.clear_cover_overlays(page)
+        schedule_text = "\u5b9a\u65f6\u53d1\u5e03"
+
+        clicked_schedule = await page.evaluate(
+            """(text) => {
+                const labels = Array.from(document.querySelectorAll("label[class^='radio']"));
+                const target = labels.find(el => el.offsetParent !== null && (el.textContent || '').includes(text));
+                if (!target) return false;
+                target.click();
+                return true;
+            }""",
+            schedule_text,
+        )
+        if not clicked_schedule:
+            label_element = page.locator(f"[class^='radio']:has-text('{schedule_text}')").first
+            await label_element.click(force=True)
+
+        await asyncio.sleep(0.8)
         publish_date_hour = publish_date.strftime("%Y-%m-%d %H:%M")
 
-        await asyncio.sleep(1)
-        await page.locator('.semi-input[placeholder="日期和时间"]').click()
+        datetime_text = "\u65e5\u671f\u548c\u65f6\u95f4"
+        date_input_selectors = [
+            f".semi-input[placeholder='{datetime_text}']",
+            f"input[placeholder='{datetime_text}']",
+            "input[placeholder*='date'][placeholder*='time']",
+            "div.semi-datepicker-input",
+            "div.semi-datepicker",
+            "div[class*='date-picker']",
+        ]
+        clicked = False
+        for selector in date_input_selectors:
+            loc = page.locator(selector).first
+            try:
+                if await loc.count() and await loc.is_visible():
+                    await loc.click(force=True, timeout=2000)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            raise RuntimeError("Failed to locate schedule datetime input on Douyin publish page.")
+
+        await asyncio.sleep(0.2)
         await page.keyboard.press("Control+KeyA")
         await page.keyboard.type(str(publish_date_hour))
         await page.keyboard.press("Enter")
-
         await asyncio.sleep(1)
+
+    async def _is_text_visible(self, page: Page, text: str) -> bool:
+        loc = page.get_by_text(text).first
+        try:
+            return await loc.count() > 0 and await loc.is_visible()
+        except Exception:
+            return False
+
+    async def _publish_success_detected(self, page: Page) -> bool:
+        if "creator-micro/content/manage" in page.url:
+            return True
+
+        success_markers = [
+            "\u53d1\u5e03\u6210\u529f",
+            "\u5b9a\u65f6\u53d1\u5e03\u6210\u529f",
+            "\u4f5c\u54c1\u7ba1\u7406",
+            "\u7ee7\u7eed\u53d1\u5e03",
+        ]
+        for marker in success_markers:
+            if await self._is_text_visible(page, marker):
+                return True
+        return False
+
+    async def _fix_too_soon_schedule(self, page: Page) -> bool:
+        # Douyin blocks scheduled publish when it is under 2h.
+        warn_markers = [
+            "\u8ddd\u79bb\u5b9a\u65f6\u53d1\u5e03\u65f6\u95f4\u5c0f\u4e8e2\u5c0f\u65f6",
+            "\u8bf7\u91cd\u65b0\u8bbe\u7f6e\u53d1\u5e03\u65f6\u95f4",
+        ]
+        warn_visible = False
+        for marker in warn_markers:
+            if await self._is_text_visible(page, marker):
+                warn_visible = True
+                break
+        if not warn_visible:
+            return False
+
+        new_publish_time = datetime.now() + timedelta(minutes=170)
+        douyin_logger.warning(
+            f"  [-] schedule too close, auto-adjust to {new_publish_time.strftime('%Y-%m-%d %H:%M')}"
+        )
+        await self.set_schedule_time_douyin(page, new_publish_time)
+        await asyncio.sleep(0.8)
+        return True
 
     async def handle_upload_error(self, page):
         douyin_logger.info('视频出错了，重新上传中')
@@ -135,6 +212,11 @@ class DouYinVideo(object):
         # 创建一个浏览器上下文，使用指定的 cookie 文件
         context = await browser.new_context(storage_state=f"{self.account_file}")
         context = await set_init_script(context)
+        try:
+            await context.set_geolocation({"latitude": 39.9042, "longitude": 116.4074, "accuracy": 50})
+            await context.grant_permissions(["geolocation"], origin="https://creator.douyin.com")
+        except Exception:
+            pass
 
         # 创建一个新的页面
         page = await context.new_page()
@@ -234,22 +316,43 @@ class DouYinVideo(object):
             await self.set_schedule_time_douyin(page, self.publish_date)
 
         # 判断视频是否发布成功
-        while True:
-            # 判断视频是否发布成功
+        max_publish_checks = 120
+        for attempt in range(1, max_publish_checks + 1):
             try:
-                publish_button = page.get_by_role('button', name="发布", exact=True)
-                if await publish_button.count():
-                    await publish_button.click()
-                await page.wait_for_url("https://creator.douyin.com/creator-micro/content/manage**",
-                                        timeout=3000)  # 如果自动跳转到作品页面，则代表发布成功
+                await self.clear_cover_overlays(page)
+                await self._fix_too_soon_schedule(page)
+
+                publish_button = page.get_by_role('button', name="发布", exact=True).first
+                if await publish_button.count() and await publish_button.is_visible():
+                    await publish_button.click(timeout=3000)
+
+                await asyncio.sleep(0.8)
+                if await self._fix_too_soon_schedule(page):
+                    continue
+
+                if await self._publish_success_detected(page):
+                    douyin_logger.success("  [-]视频发布成功")
+                    break
+
+                await page.wait_for_url("**/creator-micro/content/manage**", timeout=2500)
                 douyin_logger.success("  [-]视频发布成功")
                 break
-            except:
+            except Exception as e:
                 # 尝试处理封面问题
                 await self.handle_auto_video_cover(page)
-                douyin_logger.info("  [-] 视频正在发布中...")
-                await page.screenshot(full_page=True)
-                await asyncio.sleep(0.5)
+                await self._fix_too_soon_schedule(page)
+                if await self._publish_success_detected(page):
+                    douyin_logger.success("  [-]视频发布成功")
+                    break
+                if attempt % 10 == 0:
+                    douyin_logger.warning(
+                        f"  [-] waiting publish result... attempt={attempt} url={page.url} err={e}"
+                    )
+                await asyncio.sleep(0.8)
+        else:
+            raise RuntimeError(
+                f"Publish did not complete after {max_publish_checks} checks. Current URL: {page.url}"
+            )
 
         await context.storage_state(path=self.account_file)  # 保存cookie
         douyin_logger.success('  [-]cookie更新完毕！')
@@ -295,24 +398,83 @@ class DouYinVideo(object):
         return False
 
     async def set_thumbnail(self, page: Page, thumbnail_path: str):
-        if thumbnail_path:
-            douyin_logger.info('  [-] 正在设置视频封面...')
-            await page.click('text="选择封面"')
-            await page.wait_for_selector("div.dy-creator-content-modal")
-            await page.click('text="设置竖封面"')
-            await page.wait_for_timeout(2000)  # 等待2秒
-            # 定位到上传区域并点击
-            await page.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input").set_input_files(thumbnail_path)
-            await page.wait_for_timeout(2000)  # 等待2秒
-            await page.locator("div#tooltip-container button:visible:has-text('完成')").click()
-            # finish_confirm_element = page.locator("div[class^='confirmBtn'] >> div:has-text('完成')")
-            # if await finish_confirm_element.count():
-            #     await finish_confirm_element.click()
-            # await page.locator("div[class^='footer'] button:has-text('完成')").click()
-            douyin_logger.info('  [+] 视频封面设置完成！')
-            # 等待封面设置对话框关闭
-            await page.wait_for_selector("div.extractFooter", state='detached')
-            
+        if not thumbnail_path:
+            return
+
+        choose_cover_text = "\u9009\u62e9\u5c01\u9762"
+        set_vertical_text = "\u8bbe\u7f6e\u7ad6\u5c01\u9762"
+        set_horizontal_text = "\u8bbe\u7f6e\u6a2a\u5c01\u9762"
+        finish_text = "\u5b8c\u6210"
+
+        douyin_logger.info("  [-] setting video cover...")
+        await page.click(f'text="{choose_cover_text}"')
+        await page.wait_for_selector("div.dy-creator-content-modal", timeout=10000)
+
+        # Keep original flow: select vertical cover and upload thumbnail.
+        vertical_tab = page.get_by_text(set_vertical_text).first
+        try:
+            if await vertical_tab.count() and await vertical_tab.is_visible():
+                await vertical_tab.click(force=True, timeout=2000)
+        except Exception:
+            pass
+
+        await page.wait_for_timeout(1200)
+        upload_input = page.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input").first
+        if await upload_input.count():
+            await upload_input.set_input_files(thumbnail_path)
+            await page.wait_for_timeout(1200)
+
+        # Original complete click.
+        try:
+            await page.locator(f"div#tooltip-container button:visible:has-text('{finish_text}')").first.click(timeout=1800)
+        except Exception:
+            pass
+
+        modal = page.locator("div.dy-creator-content-modal").first
+
+        # Targeted fix only: if still blocked, click the "完成" button left to "设置横封面".
+        try:
+            if await modal.count() and await modal.is_visible():
+                horizontal_btn = page.locator(
+                    f"div.dy-creator-content-modal button:has-text('{set_horizontal_text}')"
+                ).first
+                clicked_done_left = False
+                if await horizontal_btn.count() and await horizontal_btn.is_visible():
+                    done_left_btn = horizontal_btn.locator("xpath=preceding-sibling::button[1]")
+                    if await done_left_btn.count() and await done_left_btn.is_visible():
+                        done_left_text = await done_left_btn.text_content() or ""
+                        if finish_text in done_left_text:
+                            await done_left_btn.click(force=True, timeout=2000)
+                            clicked_done_left = True
+
+                if not clicked_done_left:
+                    complete_btn = page.locator(
+                        f"div.dy-creator-content-modal button:has-text('{finish_text}')"
+                    ).first
+                    if await complete_btn.count() and await complete_btn.is_visible():
+                        await complete_btn.click(force=True, timeout=2000)
+        except Exception:
+            pass
+
+        # Wait modal close; if not closed, click close button as fallback.
+        try:
+            await page.wait_for_selector("div.dy-creator-content-modal", state='hidden', timeout=5000)
+        except Exception:
+            close_selectors = [
+                "div.dy-creator-content-modal [class*='close']",
+                "div.dy-creator-content-modal .semi-modal-close",
+            ]
+            for selector in close_selectors:
+                target = page.locator(selector).first
+                try:
+                    if await target.count() and await target.is_visible():
+                        await target.click(force=True, timeout=1200)
+                        break
+                except Exception:
+                    continue
+
+        await self.clear_cover_overlays(page)
+        douyin_logger.info("  [+] video cover step completed")
 
     async def set_location(self, page: Page, location: str = ""):
         if not location:
@@ -418,6 +580,61 @@ class DouYinVideo(object):
         except Exception as e:
             douyin_logger.error(f"[-] 设置商品链接时出错: {str(e)}")
             return False
+
+    async def clear_cover_overlays(self, page: Page) -> None:
+        portal_selector = "div.dy-creator-content-portal"
+        try:
+            if await page.locator(portal_selector).count() == 0:
+                return
+        except Exception:
+            return
+
+        for _ in range(2):
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+            await page.wait_for_timeout(250)
+            try:
+                if await page.locator(f"{portal_selector}:visible").count() == 0:
+                    return
+            except Exception:
+                pass
+        selectors = [
+            f"{portal_selector} button:has-text('\u53d6\u6d88')",
+            f"{portal_selector} button:has-text('\u5173\u95ed')",
+            f"{portal_selector} button:has-text('\u5b8c\u6210')",
+            f"{portal_selector} [aria-label='\u5173\u95ed']",
+            f"{portal_selector} [class*='close']",
+            f"{portal_selector} [class*='Close']",
+            f"{portal_selector} [class*='cancel']",
+            f"{portal_selector} [class*='Cancel']",
+        ]
+        for selector in selectors:
+            target = page.locator(selector).first
+            try:
+                if await target.count() and await target.is_visible():
+                    await target.click(force=True, timeout=1200)
+                    await page.wait_for_timeout(250)
+                    if await page.locator(f"{portal_selector}:visible").count() == 0:
+                        return
+            except Exception:
+                continue
+
+        try:
+            await page.evaluate(
+                """() => {
+                    for (const root of document.querySelectorAll('div.dy-creator-content-portal')) {
+                        root.style.pointerEvents = 'none';
+                        for (const el of root.querySelectorAll('*')) {
+                            el.style.pointerEvents = 'none';
+                        }
+                    }
+                }"""
+            )
+            douyin_logger.info("  [-] Cover popup still visible, pointer-events disabled")
+        except Exception:
+            pass
 
     async def main(self):
         async with async_playwright() as playwright:
